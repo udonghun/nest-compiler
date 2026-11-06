@@ -9,11 +9,13 @@ name: build
 # ETRI 공식 SDK 이미지(onesai1/nest-compiler-sdk) 안에서 돈다.
 # GitHub 호스티드 러너는 쓰지 않는다.
 
+# [포크 udonghun/nest-compiler 전용] 포크에서는 브랜치를 푸시하면 바로 보드 시험을 돌린다.
+# 성과가 있는 커밋만 SOTA-PNU/nest-compiler 로 옮긴다. 이 커밋은 그쪽으로 옮기지 않는다.
 on:
   pull_request:
     branches: [main]
   push:
-    branches: [main]
+    branches: ["**"]
   workflow_dispatch:
     inputs:
       test_all:
@@ -26,9 +28,10 @@ permissions:
   contents: read
 
 # 같은 브랜치에 새 커밋이 오면 이전 실행은 의미가 없다. main 은 끝까지 돌린다.
+# 포크에서는 취소하지 않는다. test-board 가 VTA 추론 중에 취소되면 보드를 재부팅해야 한다.
 concurrency:
   group: build-${{ github.ref }}
-  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+  cancel-in-progress: false
 
 defaults:
   run:
@@ -41,7 +44,8 @@ jobs:
   build:
     # public 레포 + self-hosted 러너: 포크에서 온 PR 은 이 머신에서 실행하지 않는다.
     # 본 레포 브랜치에서 연 PR(조직 멤버)은 정상 실행된다.
-    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    # 포크에는 compute-nestc(label nestc) 러너가 없으므로 원본 저장소에서만 돈다.
+    if: github.repository == 'SOTA-PNU/nest-compiler' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
     name: ${{ matrix.name }}
     runs-on: [self-hosted, linux, X64, nestc]
     container:
@@ -187,7 +191,8 @@ jobs:
     needs: build
     # public 레포 + self-hosted 러너: 포크에서 온 PR 은 이 머신에서 실행하지 않는다.
     # 본 레포 브랜치에서 연 PR(조직 멤버)은 정상 실행된다.
-    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    # 포크에서는 build 가 건너뛰어지므로(skipped) 실패만 아니면 돈다.
+    if: ${{ !cancelled() && needs.build.result != 'failure' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
     runs-on: [self-hosted, linux, X64, zcu102]
     timeout-minutes: 240
     # VTA 추론 중에 취소하면 보드를 재부팅해야 한다. 보드 작업은 취소하지 않고 줄을 세운다.
@@ -196,6 +201,8 @@ jobs:
       cancel-in-progress: false
     env:
       SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+      # 커밋은 이 workflow 가 도는 저장소(포크면 포크)에서 받는다.
+      REPO_URL: https://github.com/${{ github.repository }}.git
       BOARD_SRC: /home/xilinx/nest-compiler-sota
       DOCKER_IMAGE: leejaymin/nestc-ssh:latest
       TOOLS_IN_CONTAINER: /src/build/glow/bin
@@ -237,7 +244,7 @@ jobs:
           UP=$HOME/nestc-sota
           echo "UP=$UP" >> "$GITHUB_ENV"
           cd "$UP"
-          git fetch -q --no-recurse-submodules sota "$SHA"
+          git fetch -q --no-recurse-submodules "$REPO_URL" "$SHA"
           git checkout -q -f --detach "$SHA"
           git clean -fdq -e build
           git submodule sync -q
@@ -259,7 +266,7 @@ jobs:
           scp ci/patch_transpose.py ci/patch_relu_rescale.py ci/patch_vta_max_xfer.py board:/home/xilinx/
           ssh board "set -euo pipefail
             cd $BOARD_SRC
-            for t in 1 2 3 4 5; do git fetch -q --no-recurse-submodules sota $SHA && break; sleep 30; done
+            for t in 1 2 3 4 5; do git fetch -q --no-recurse-submodules $REPO_URL $SHA && break; sleep 30; done
             git checkout -q -f --detach $SHA
             git submodule sync -q vta/vtalib
             git submodule update -q --force vta/vtalib
@@ -358,7 +365,7 @@ jobs:
 
   # GitLab: test-all (manual, allow_failure)
   test-all:
-    if: github.event_name == 'workflow_dispatch' && inputs.test_all
+    if: github.repository == 'SOTA-PNU/nest-compiler' && github.event_name == 'workflow_dispatch' && inputs.test_all
     runs-on: [self-hosted, linux, X64, nestc]
     container:
       image: onesai1/nest-compiler-sdk:1.0.0
